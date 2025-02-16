@@ -2,20 +2,28 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"math/rand"
 	"net/http"
 	"time"
 
 	"github.com/hn275/catapi/internal"
+	"github.com/jmoiron/sqlx"
 	"github.com/joho/godotenv"
 )
+
+type App struct {
+	totalCat int64
+	db       *sqlx.DB
+	logger   *slog.Logger
+}
 
 func main() {
 	if err := godotenv.Load(); err != nil {
 		panic(err)
 	}
 
-	log := internal.NewLogger()
+	logger := internal.NewLogger()
 
 	db, err := internal.NewDatabase(internal.MustEnv("DATABASE"))
 	if err != nil {
@@ -27,17 +35,29 @@ func main() {
 		panic(err)
 	}
 
-	log.Info(fmt.Sprintf("Randomizing %d cats", totalCat))
+	logger.Info(fmt.Sprintf("Randomizing %d cats", totalCat))
 
+	app := App{totalCat, db, logger}
 	mux := http.NewServeMux()
 
-	mux.Handle("/api/cat", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		now := time.Now()
-		catID := rand.Int63n(totalCat)
+	mux.Handle("/", serve(&app))
 
+	logger.Info("listening on http://127.0.0.1:8080")
+	logger.Error(http.ListenAndServe(":8080", mux).Error())
+}
+
+func serve(app *App) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		now := time.Now()
+		catID := rand.Int63n(app.totalCat)
+
+		q := "SELECT file_type,data FROM cats WHERE id = ?"
 		var cat internal.CatData
-		if err := db.Get(&cat, "SELECT file_type,data FROM cats WHERE id = ?", catID); err != nil {
-			panic(err)
+		if err := app.db.Get(&cat, q, catID); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			since := time.Since(now).Microseconds()
+			app.logger.Error("error", err.Error(), "user", r.UserAgent(), "ip", r.RemoteAddr, "time(micro)", since)
+			return
 		}
 
 		w.Header().Set("Content-Type", cat.FileType)
@@ -46,14 +66,11 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 
 		n, err := w.Write(cat.Data)
+		since := time.Since(now).Microseconds()
 		if err != nil {
-			log.Error(err.Error())
+			app.logger.Error("error", err.Error(), "user", r.UserAgent(), "ip", r.RemoteAddr, "time(micro)", since)
 		} else {
-			since := time.Since(now).Microseconds()
-			log.Info("served", "user", r.UserAgent(), "ip", r.RemoteAddr, "bytes", n, "time(micro)", since)
+			app.logger.Info("served", "user", r.UserAgent(), "ip", r.RemoteAddr, "bytes", n, "time(micro)", since)
 		}
-	}))
-
-	log.Info("listening on http://127.0.0.1:8080")
-	log.Error(http.ListenAndServe(":8080", mux).Error())
+	}
 }
